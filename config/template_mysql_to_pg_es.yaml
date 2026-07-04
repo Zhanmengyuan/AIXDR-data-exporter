@@ -1,0 +1,116 @@
+# ============================================================
+# AIXDR MySQL → PostgreSQL + Elasticsearch 跨库迁移配置模板
+# ============================================================
+# 使用说明：
+# 1. 复制此文件并重命名为你的配置文件名（如 my_config.yaml）
+# 2. 修改下方标记为【必填】的参数值
+# 3. 运行命令：aixdr-exporter export-import --config template_mysql_to_pg_es.yaml --source mysql --target postgresql  
+# ============================================================
+# 特点：自动将 MySQL SQL 语法转换为 PostgreSQL 兼容语法
+# ============================================================
+
+# ================== MySQL 源数据库配置【必填】 ==================
+source:
+  # MySQL 源数据库地址【必填】
+  host: 192.168.112.150
+  port: 3306
+  user: root
+  password: maxs.PDG~2022
+  database: SSA
+
+# ================== PostgreSQL 目标数据库配置【必填】 ==================
+pg_target:
+  # PostgreSQL 目标数据库地址【必填】
+  host: 192.168.113.167
+  port: 15432
+  user: root
+  password: maxs.PDG~2022
+  database: ssa
+
+# ================== Elasticsearch 源配置【必填】 ==================
+es_source:
+  # ES 源集群地址【必填】
+  host: 192.168.112.150
+  port: 9200
+  user: elastic
+  password: maxs.PDG~2022
+  use_ssl: true
+
+# ================== Elasticsearch 目标配置【必填】 ==================
+es_target:
+  host: 192.168.113.167
+  port: 9200
+  user: elastic
+  password: maxs.PDG~2022
+  use_ssl: true
+
+# ================== 资产 ID 配置【必填】 ==================
+assets:
+  # 要迁移的资产 ID 列表【必填】
+  # 支持多个资产 ID，用逗号分隔或列表形式
+  - 2018927604608049207
+  - 2018897636075282449
+  - 2019033414667378738
+  - 1988849316606693377
+  - 2018927762326462470
+  - 2019033783782907937
+  - 2035435203421093891
+  - 2018942689606934536
+  - 2017085751302594565
+  - 1985543753442967553
+
+
+# ================== MySQL 导出配置 ==================
+export:
+  # MySQL 数据导出文件路径【可选】（默认 ./exports/assets_export.sql）
+  # 导出的 MySQL SQL 会自动转换为 PostgreSQL 格式
+  output: ./exports/assets_export.sql
+
+# ================== ES 导出配置 ==================
+es_export:
+  # ES 数据导出目录【可选】（默认 ./exports/es_latest/）
+  output_dir: ./exports/es_latest/
+  
+  # 每批次导出数量【可选】（默认 1000）
+  size_per_batch: 1000
+
+# ================== ES 索引配置【可选】 ==================
+es_indices:
+  asset: xdr_asset
+
+  # 资产指纹索引名【可选】（默认 xdr_asset_fingerprint）
+  fingerprint: xdr_asset_fingerprint
+  
+  # 资产历史索引名【可选】（默认 xdr_asset_his）
+  asset_his: xdr_asset_his
+  
+  # 告警索引前缀【可选】（默认 maxs_alarm_）
+  alarm_pattern: maxs_alarm_
+  # 事件索引前缀【可选】（默认 maxs_event_）
+  event_pattern: maxs_event_
+  index_cycles: [202606, 202605, 202604, 202603, 202602, 202601]
+
+# ================== 数据验证配置 ==================
+verify:
+  enabled: true
+
+# ============================================================
+# 使用示例：
+# ============================================================
+# 1. MySQL → PostgreSQL + ES 一键迁移：
+#    aixdr-exporter export-import --config my_config.yaml --source mysql --target postgresql
+#
+# 2. 仅迁移 MySQL → PostgreSQL：
+#    aixdr-exporter export-import --config my_config.yaml --source mysql --target postgresql
+#    （ES 数据不会迁移）
+#
+# 3. 仅迁移 ES → ES：
+#    aixdr-exporter export-import --config my_config.yaml --source es --target es
+#    （MySQL 数据不会迁移）
+#
+# 4. 分步执行：
+#    # 第一步：导出 MySQL 数据
+#    aixdr-exporter export --config my_config.yaml --source mysql
+#    # 第二步：导入到 PostgreSQL（自动语法转换）
+#    aixdr-exporter import --config my_config.yaml --target postgresql
+# ============================================================

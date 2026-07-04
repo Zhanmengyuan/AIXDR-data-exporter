@@ -1,0 +1,93 @@
+# ============================================================
+# AIXDR PostgreSQL + Elasticsearch 完整迁移配置模板
+# ============================================================
+# 使用说明：
+# 1. 复制此文件并重命名为你的配置文件名（如 my_config.yaml）
+# 2. 修改下方标记为【必填】的参数值
+# 3. 运行命令：aixdr-exporter export-import --config my_config.yaml
+# ============================================================
+
+# ================== PostgreSQL 源数据库配置【必填】 ==================
+pg_source:
+  # PostgreSQL 源数据库地址【必填】
+  host: 192.168.112.150
+  port: 15432
+  user: root
+  password: maxs.PDG~2022
+  database: ssa
+
+# ================== PostgreSQL 目标数据库配置【必填】 ==================
+pg_target:
+  # PostgreSQL 目标数据库地址【必填】
+  host: 192.168.112.151
+  port: 15432
+  user: root
+  password: maxs.PDG~2022
+  database: ssa
+
+# ================== Elasticsearch 源配置【必填】 ==================
+es_source:
+  # ES 源集群地址【必填】
+  host: 192.168.112.150
+  port: 9200
+  user: elastic
+  password: maxs.PDG~2022
+  use_ssl: true
+
+# ================== Elasticsearch 目标配置【必填】 ==================
+es_target:
+  # ES 目标集群地址【必填】
+  host: 192.168.112.151
+  port: 9200
+  user: elastic
+  password: maxs.PDG~2022
+  use_ssl: true
+
+# ================== 资产 ID 配置【必填】 ==================
+assets:
+  # 要迁移的资产 ID 列表【必填】
+  # 支持多个资产 ID，用逗号分隔或列表形式
+  - 2034925256820211717
+  - 2018655941286993954
+  # 添加更多资产 ID...
+
+# ================== PostgreSQL 导出配置 ==================
+export:
+  output: ./exports/pg_assets_export.sql
+
+# ================== ES 导出配置 ==================
+es_export:
+  output_dir: ./exports/es_latest/
+  size_per_batch: 1000
+
+# ================== ES 索引配置【可选】 ==================
+es_indices:
+  asset: xdr_asset
+  fingerprint: xdr_asset_fingerprint
+  asset_his: xdr_asset_his
+  alarm_pattern: maxs_alarm_
+  event_pattern: maxs_event_
+  
+  # 要导出的月份索引【必填】（格式：YYYYMM）
+  index_cycles: [202605, 202604, 202603]
+
+# ================== 数据验证配置 ==================
+verify:
+  enabled: true
+
+# ============================================================
+# 使用示例：
+# ============================================================
+# 1. PostgreSQL + ES 一键迁移：
+#    aixdr-exporter export-import --config my_config.yaml
+#
+# 2. 仅迁移 PostgreSQL 数据：
+#    aixdr-exporter export-import --config my_config.yaml --source postgresql --target postgresql
+#
+# 3. 仅迁移 ES 数据：
+#    aixdr-exporter export-import --config my_config.yaml --source es --target es
+#
+# 4. 分步执行：
+#    aixdr-exporter export --config my_config.yaml --source postgresql
+#    aixdr-exporter import --config my_config.yaml --target postgresql
+# ============================================================

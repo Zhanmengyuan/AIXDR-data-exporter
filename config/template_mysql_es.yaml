@@ -1,0 +1,99 @@
+# ============================================================
+# AIXDR MySQL + Elasticsearch 完整迁移配置模板
+# ============================================================
+# 使用说明：
+# 1. 复制此文件并重命名为你的配置文件名（如 my_config.yaml）
+# 2. 修改下方标记为【必填】的参数值
+# 3. 运行命令：aixdr-exporter export-import --config my_config.yaml
+# ============================================================
+
+# ================== MySQL 源数据库配置【必填】 ==================
+source:
+  # MySQL 源数据库地址【必填】
+  host: 10.21.19.99
+  port: 3306
+  user: root
+  password: maxs.PDG~2022
+  database: SSA
+
+# ================== MySQL 目标数据库配置【必填】 ==================
+target:
+  # MySQL 目标数据库地址【必填】
+  host: 192.168.115.68
+  port: 3306
+  user: root
+  password: maxs.PDG~2022
+  database: SSA
+
+# ================== Elasticsearch 源配置【必填】 ==================
+es_source:
+  # ES 源集群地址【必填】
+  host: 10.21.19.99
+  port: 9200
+  user: elastic
+  password: maxs.PDG~2022
+  use_ssl: true
+
+# ================== Elasticsearch 目标配置【必填】 ==================
+es_target:
+  # ES 目标集群地址【必填】
+  host: 192.168.115.68
+  port: 9200】
+  user: elastic
+  password: maxs.PDG~2022
+  use_ssl: true
+
+# ================== 资产 ID 配置【必填】 ==================
+assets:
+  # 要迁移的资产 ID 列表【必填】
+  # 支持多个资产 ID，用逗号分隔或列表形式
+  - 2019410738962841604
+  - 2018021633618649093
+
+# ================== MySQL 导出配置 ==================
+export:
+  # MySQL 数据导出文件路径【可选】（默认 ./exports/assets_export.sql）
+  output: ./exports/assets_export.sql
+
+# ================== ES 导出配置 ==================
+es_export:
+  # ES 数据导出目录【可选】（默认 ./exports/es_latest/）
+  output_dir: ./exports/es_latest/
+  # 每批次导出数量【可选】（默认 1000）
+  size_per_batch: 1000
+
+# ================== ES 索引配置【可选】 ==================
+es_indices:
+  asset: xdr_asset
+  # 资产指纹索引名【可选】（默认 xdr_asset_fingerprint）
+  fingerprint: xdr_asset_fingerprint
+  # 资产历史索引名【可选】（默认 xdr_asset_his）
+  asset_his: xdr_asset_his
+  # 告警索引前缀【可选】（默认 maxs_alarm_）
+  alarm_pattern: maxs_alarm_
+  # 事件索引前缀【可选】（默认 maxs_event_）
+  event_pattern: maxs_event_
+  #导出 2026年5月、4月、3月的告警和事件数据
+  index_cycles: [202605, 202604, 202603]
+
+# ================== 数据验证配置 ==================
+verify:
+  # 导入后是否验证数据完整性【可选】（默认 true）
+  enabled: true
+
+# ============================================================
+# 使用示例：
+# ============================================================
+# 1. MySQL + ES 一键迁移：
+#    aixdr-exporter export-import --config my_config.yaml
+#
+# 2. 仅迁移 MySQL 数据：
+#    aixdr-exporter export-import --config my_config.yaml --source mysql --target mysql
+#
+# 3. 仅迁移 ES 数据：
+#    aixdr-exporter export-import --config my_config.yaml --source es --target es
+#
+# 4. 分步执行：
+#    aixdr-exporter export --config my_config.yaml
+#    aixdr-exporter import --config my_config.yaml
+# ============================================================
