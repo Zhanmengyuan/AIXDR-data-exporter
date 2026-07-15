@@ -1,344 +1,242 @@
 # AIXDR Data Exporter
 
-AIXDR 资产数据导出导入工具。支持将资产及其关联数据从 MySQL 数据库和 Elasticsearch 集群导出，并导入到 MySQL 或 PostgreSQL 目标环境。
+AIXDR 资产数据导出导入工具。支持在 MySQL、PostgreSQL、Elasticsearch 之间迁移资产数据，含 MySQL→PostgreSQL 跨库 SQL 语法自动转换。
 
-## 最新版本
-
-**v1.2.0** - 新增 PostgreSQL 完整支持
+**当前版本：v1.2.0**
 
 ## 功能特性
 
-- **MySQL 数据导出/导入**：资产主表、资产 IP、资产漏洞、风险端口、弱密码
-- **PostgreSQL 数据导出/导入**：支持从 PostgreSQL 数据库导出数据并导入到 PostgreSQL 目标环境
-- **MySQL → PostgreSQL 数据迁移**：支持从 MySQL 导出的数据转换并导入到 PostgreSQL
-- **Elasticsearch 数据导出/导入**：资产索引、资产指纹、资产历史、告警、事件
-- **一键导出+导入**：支持从源到目标的全自动数据迁移
-- **智能删除**：导入时仅删除指定资产的相关数据，不影响其他数据
-- **多资产支持**：一次配置多个资产 ID，批量操作
-- **SQL 语法转换**：自动将 MySQL 语法转换为 PostgreSQL 兼容语法
-- **数据验证**：导入后自动验证数据完整性
+- **三数据源**：MySQL、PostgreSQL、Elasticsearch
+- **跨库迁移**：MySQL → PostgreSQL（自动 SQL 语法转换）
+- **一键迁移**：`export-import` 串联导出 + 导入 + 验证
+- **智能删除**：导入时按 asset_id 清理旧数据，不影响其他资产
+- **级联导出**：自动追踪 asset_id → device_id 关联，导出全部关联表
+- **ES 按月分片**：告警/事件索引支持 `maxs_alarm_{YYYYMM}` 模式
+- **多格式支持**：SQL / CSV / JSON Lines / NDJSON
+- **配置模板**：3 套标准模板覆盖全部迁移场景
 
-## 快速开始 - 真实操作指南
+## 数据模型与关联逻辑
 
-### 第一步：准备安装包
+### MySQL / PostgreSQL 表关系
 
-项目已构建好，安装包位于 `dist/` 目录：
+5 张表通过 `asset_id` 和 `device_id` 级联关联（MySQL 表名大写，PostgreSQL 表名小写）：
 
 ```
-dist/
-├── aixdr_data_exporter-1.2.0-py3-none-any.whl  # Wheel 安装包（推荐）
-└── aixdr_data_exporter-1.2.0.tar.gz            # 源码包
+XDR_ASSET (asset_id, device_id)
+  │
+  ├── asset_id ──→ XDR_ASSET_IP       (资产 IP)
+  ├── asset_id ──→ XDR_ASSET_VULN     (资产漏洞)
+  ├── asset_id ──→ XDR_RISK_PORT      (风险端口)
+  └── device_id ─→ XDR_WEAK_PASSWORD  (弱密码)
 ```
 
-### 第二步：安装工具
+| 表名 (MySQL / PostgreSQL) | 关联字段 | 关联目标 | 过滤条件 |
+|---------------------------|---------|---------|---------|
+| XDR_ASSET / xdr_asset | asset_id | — | `asset_id IN (...)` |
+| XDR_ASSET_IP / xdr_asset_ip | asset_id | XDR_ASSET | `asset_id IN (...)` |
+| XDR_ASSET_VULN / xdr_asset_vuln | asset_id | XDR_ASSET | `asset_id IN (...)` |
+| XDR_RISK_PORT / xdr_risk_port | asset_id | XDR_ASSET | `asset_id IN (...)` |
+| XDR_WEAK_PASSWORD / xdr_weak_password | device_id | XDR_ASSET.device_id | `device_id IN (...)` |
+
+> **关键**：`XDR_WEAK_PASSWORD` 不通过 `asset_id` 关联，而是通过 `XDR_ASSET.device_id` 间接关联。导出时先从 `XDR_ASSET` 收集 `device_id`，再导出对应的弱密码记录。
+
+### Elasticsearch 索引关系
+
+5 类索引，按 `ASSET_ID` 查询，告警/事件使用 nested 查询：
+
+| 索引 | 查询方式 | 查询字段 | 说明 |
+|------|---------|---------|------|
+| xdr_asset | term | ASSET_ID | 资产主数据 |
+| xdr_asset_fingerprint | term | ASSET_ID | 资产指纹 |
+| xdr_asset_his | term | ASSET_ID | 资产历史 |
+| maxs_alarm_{YYYYMM} | nested | AFFECTED_ASSET_INFO.ASSET_ID | 告警（按月分片） |
+| maxs_event_{YYYYMM} | nested | AFFECTED_ASSET_INFO.ASSET_ID | 事件（按月分片） |
+
+### 导出顺序
+
+按依赖关系顺序导出，先主表后关联表：
+
+1. `XDR_ASSET`（同时收集 `device_id`）
+2. `XDR_ASSET_IP`
+3. `XDR_ASSET_VULN`
+4. `XDR_RISK_PORT`
+5. `XDR_WEAK_PASSWORD`（使用步骤 1 收集的 `device_id`）
+
+### 智能删除顺序
+
+导入时按依赖逆序删除，先删被依赖方再删主表，避免外键约束冲突：
+
+1. `XDR_WEAK_PASSWORD`（按 `device_id`）
+2. `XDR_RISK_PORT`（按 `asset_id`）
+3. `XDR_ASSET_VULN`（按 `asset_id`）
+4. `XDR_ASSET_IP`（按 `asset_id`）
+5. `XDR_ASSET`（按 `asset_id`）
+
+> PostgreSQL 导入兼容首次导入场景：当目标库 `xdr_asset` 尚无数据时，从待导入的 SQL 文件中解析 `device_id` 作为兜底，确保 `xdr_weak_password` 也能正确清理。
+
+## 使用手册
+
+### 安装
 
 ```bash
-# 进入项目目录
-cd /path/to/AIXDR_data_exporter_pgsql
+# 方式一：从源码运行（开发推荐）
+pip install -r requirements.txt
+python cli.py --help
 
-# 1. 安装 wheel 包（推荐）
+# 方式二：从 wheel 包安装（分发推荐）
 pip install dist/aixdr_data_exporter-1.2.0-py3-none-any.whl
-
-# 2. 验证安装成功
 aixdr-exporter --help
 ```
 
-> **常见问题**：如果 `aixdr-exporter` 命令找不到，需要将 pip 安装目录添加到 PATH：
->
-> ```bash
-> # Linux/Mac 临时添加
-> export PATH=$PATH:$(python3 -c "import site; print(site.USER_BASE)")/bin
-> 
-> # Linux/Mac 永久添加（写入 ~/.bashrc 或 ~/.zshrc）
-> echo 'export PATH=$PATH:$(python3 -c "import site; print(site.USER_BASE)")/bin' >> ~/.zshrc
-> source ~/.zshrc
-> ```
+> 如 `aixdr-exporter` 命令找不到，将 pip 用户目录加入 PATH：
+> `export PATH=$PATH:$(python3 -c "import site; print(site.USER_BASE)")/bin`
 
-### 第三步：选择配置模板（推荐）
+### 配置模板
 
-**使用标准配置模板，只需修改参数值即可：**
+项目提供 3 套标准模板，复制后修改必填项即可：
+
+| 模板文件 | 迁移场景 |
+|---------|---------|
+| `config/template_mysql_es.yaml` | MySQL + ES → MySQL + ES |
+| `config/template_postgresql_es.yaml` | PostgreSQL + ES → PostgreSQL + ES |
+| `config/template_mysql_to_pg_es.yaml` | MySQL → PostgreSQL + ES（跨库） |
 
 ```bash
-# 查看可用的配置模板
-ls config/template_*.yaml
-
-# 输出：
-# template_mysql_es.yaml           # MySQL + ES 迁移
-# template_postgresql_es.yaml      # PostgreSQL + ES 迁移
-# template_mysql_to_pg_es.yaml     # MySQL → PostgreSQL 跨库迁移
+cp config/template_mysql_es.yaml config/my_config.yaml
+# 编辑 my_config.yaml，修改标记为【必填】的字段
 ```
 
-**选择合适的模板：**
-```bash
-# MySQL + ES 迁移
-cp config/template_mysql_es.yaml config/my_migration.yaml
+### 配置项说明
 
-# PostgreSQL + ES 迁移
-cp config/template_postgresql_es.yaml config/my_migration.yaml
-
-# MySQL → PostgreSQL 跨库迁移
-cp config/template_mysql_to_pg_es.yaml config/my_migration.yaml
-```
-
-**修改必填参数：**
-打开配置文件，修改标记为 **【必填】** 的字段：
-- ✅ 数据库地址、端口、用户名、密码
-- ✅ Elasticsearch 地址、端口、用户名、密码
-- ✅ 资产 ID 列表
-- ✅ ES 索引月份
-
-**详细使用指南：**
-```bash
-# 查看配置模板详细说明
-cat config/README.md
-cat config/CONFIG_TEMPLATE_GUIDE.md
-```
-
-### 第四步：了解配置文件结构（可选）
-
-**配置模板包含以下关键部分：**
-
-#### MySQL + ES 迁移配置结构
 ```yaml
-source:      # MySQL 源数据库【必填】
-target:      # MySQL 目标数据库【必填】
-es_source:   # ES 源集群【必填】
-es_target:   # ES 目标集群【必填】
-assets:      # 资产 ID 列表【必填】
-index_cycles: # ES 索引月份【必填】
+# ── 数据库（按场景选用，不要混用）──
+source:        # MySQL 源库【必填·MySQL 场景】
+target:        # MySQL 目标库【必填·MySQL 场景】
+pg_source:     # PostgreSQL 源库【必填·PG 场景】
+pg_target:     # PostgreSQL 目标库【必填·PG 或跨库场景】
+
+# 以上各库均含字段：host / port / user / password / database
+
+# ── Elasticsearch ──
+es_source:     # ES 源集群【必填】host / port / user / password / use_ssl
+es_target:     # ES 目标集群【必填】
+
+# ── 资产与索引 ──
+assets:                       # 资产 ID 列表【必填】
+  - 2019410738962841604
+es_indices:
+  index_cycles: [202605, 202604, 202603]  # 告警/事件月份【必填】
+
+# ── 输出路径（可选）──
+export.output:          ./exports/assets_export.sql
+es_export.output_dir:   ./exports/es_latest/
+
+# ── 验证（可选）──
+verify.enabled: true    # 导入后验证，默认开启
 ```
 
-#### PostgreSQL + ES 迁移配置结构
-```yaml
-pg_source:   # PostgreSQL 源数据库【必填】
-pg_target:   # PostgreSQL 目标数据库【必填】
-es_source:   # ES 源集群【必填】
-es_target:   # ES 目标集群【必填】
-assets:      # 资产 ID 列表【必填】
-index_cycles: # ES 索引月份【必填】
-```
+### 命令参考
 
-#### MySQL → PostgreSQL 跨库迁移配置结构
-```yaml
-source:      # MySQL 源数据库【必填】
-pg_target:   # PostgreSQL 目标数据库【必填】
-es_source:   # ES 源集群【必填】
-es_target:   # ES 目标集群【必填】
-assets:      # 资产 ID 列表【必填】
-index_cycles: # ES 索引月份【必填】
+| 命令 | 用途 | 示例 |
+|------|------|------|
+| `export` | 仅导出 | `aixdr-exporter export --config cfg.yaml` |
+| `import` | 仅导入 | `aixdr-exporter import --config cfg.yaml` |
+| `export-import` | 一键导出+导入+验证 | `aixdr-exporter export-import --config cfg.yaml` |
+| `config init` | 生成配置模板 | `aixdr-exporter config init -o cfg.yaml` |
 
-```
+**常用参数：**
 
-**注意：以上仅展示配置结构，实际使用请直接复制标准模板文件。**
+- `--source mysql|postgresql|es`：指定数据源（不指定则自动检测）
+- `--target mysql|postgresql|es`：指定目标（不指定则自动检测）
+- `--drop-tables`：导入前删除整表（慎用，默认智能删除）
 
-详细配置说明请查看：[config/CONFIG_TEMPLATE_GUIDE.md](config/CONFIG_TEMPLATE_GUIDE.md)
-### 第五步：执行操作
-
-#### 操作 1：一键导出+导入（推荐）
+### 迁移场景
 
 ```bash
-# MySQL → MySQL
+# 1. MySQL + ES → MySQL + ES（自动检测源/目标）
 aixdr-exporter export-import --config my_config.yaml
 
-# MySQL → PostgreSQL
+# 2. MySQL → PostgreSQL（自动语法转换）
 aixdr-exporter export-import --config my_config.yaml --source mysql --target postgresql
 
-# PostgreSQL → PostgreSQL
+# 3. PostgreSQL → PostgreSQL
 aixdr-exporter export-import --config my_config.yaml --source postgresql --target postgresql
 
-# ES → ES
+# 4. 仅迁移 ES 数据
 aixdr-exporter export-import --config my_config.yaml --source es --target es
 
-# MySQL+ES → MySQL+ES（自动检测）
-aixdr-exporter export-import --config my_config.yaml
-```
-
-#### 操作 2：分步执行
-
-```bash
-# 第一步：仅导出
+# 5. 分步执行（先导出后导入）
 aixdr-exporter export --config my_config.yaml
-
-# 第二步：仅导入
 aixdr-exporter import --config my_config.yaml
-```
 
-#### 操作 3：指定数据源/目标
-
-```bash
-# 仅导出 MySQL
+# 6. 仅操作单一数据源
 aixdr-exporter export --config my_config.yaml --source mysql
-
-# 仅导出 PostgreSQL
-aixdr-exporter export --config my_config.yaml --source postgresql
-
-# 仅导出 ES
-aixdr-exporter export --config my_config.yaml --source es
-
-# 仅导入到 MySQL
-aixdr-exporter import --config my_config.yaml --target mysql
-
-# 仅导入到 PostgreSQL
 aixdr-exporter import --config my_config.yaml --target postgresql
-
-# 仅导入到 ES
-aixdr-exporter import --config my_config.yaml --target es
-
-# 导入前删除旧表（慎用，会清空表）
-aixdr-exporter import --config my_config.yaml --drop-tables
 ```
 
-### 第六步：验证结果
+## MySQL → PostgreSQL 语法转换
 
-导入完成后，工具会自动验证数据完整性。你也可以手动验证：
+跨库迁移时自动转换 SQL 语法（`exporter/sql_converter.py`）：
 
-```bash
-# 查看导出文件
-ls -lh exports/
-
-# MySQL 验证（连接目标库）
-mysql -h target_host -u root -p -D target_db -e "SELECT COUNT(*) FROM XDR_ASSET;"
-
-# PostgreSQL 验证
-psql -h target_host -p 5432 -U root -d target_db -c "SELECT COUNT(*) FROM xdr_asset;"
-
-# ES 验证
-curl -u elastic:password https://target_host:9200/xdr_asset/_count
-```
-
-## PostgreSQL 导入功能详解
-
-### 核心文件说明
-
-项目包含以下 PostgreSQL 相关文件：
-
-| 文件路径 | 功能说明 |
-|---------|---------|
-| `exporter/postgresql_importer.py` | PostgreSQL 数据导入核心模块，处理 SQL 导入、数据转换、智能删除 |
-| `exporter/handlers/postgresql_handler.py` | PostgreSQL 数据处理器，提供统一的导入、验证接口 |
-| `exporter/sql_converter.py` | MySQL 到 PostgreSQL 的 SQL 语法转换器 |
-| `config/example_postgresql_config.yaml` | PostgreSQL 配置示例文件 |
-
-### PostgreSQLImporter 核心功能
-
-`exporter/postgresql_importer.py` 提供以下核心功能：
-
-1. **数据库连接管理**：自动连接 PostgreSQL，支持数据库自动创建
-2. **SQL 语句解析**：智能分割 SQL 语句，正确处理字符串中的分号
-3. **智能删除**：按资产 ID 删除目标表中的旧数据，按正确顺序执行删除操作
-4. **数据导入**：仅导入 INSERT 语句，跳过 DDL 操作，避免破坏目标表结构
-5. **表名映射**：自动处理表名大小写问题，支持 public schema
-6. **批量提交**：每 1000 条记录自动提交，提升导入效率
-7. **CSV/JSON 导入**：支持从 CSV 和 JSON Lines 格式导入数据
-
-### MySQLToPostgreSQLConverter 转换功能
-
-`exporter/sql_converter.py` 提供以下语法转换：
-
-| 转换项 | MySQL 语法 | PostgreSQL 语法 |
-|-------|-----------|----------------|
-| 标识符引用 | `` `table_name` `` | `"table_name"` |
-| 数据类型 | `TINYINT`, `MEDIUMINT`, `BLOB` | `SMALLINT`, `INTEGER`, `BYTEA` |
-| 表选项 | `ENGINE=InnoDB`, `DEFAULT CHARSET=utf8` | 自动移除 |
-| 自增列 | `AUTO_INCREMENT` | `SERIAL`/`BIGSERIAL` |
-| 布尔值 | `'true'`, `'false'` | `TRUE`, `FALSE` |
+| 转换项 | MySQL | PostgreSQL |
+|--------|-------|-----------|
+| 标识符引用 | `` `table_name` `` | `"table_name"`（转小写） |
+| TINYINT | TINYINT | SMALLINT |
+| MEDIUMINT | MEDIUMINT | INTEGER |
+| FLOAT | FLOAT | REAL |
+| DOUBLE | DOUBLE | DOUBLE PRECISION |
+| DATETIME | DATETIME | TIMESTAMP |
+| BLOB 系列 | BLOB / MEDIUMBLOB / LONGBLOB | BYTEA |
+| 无符号 | UNSIGNED | 移除 |
+| 表选项 | ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 | 移除 |
 | 索引长度 | `INDEX idx (col(191))` | `INDEX idx (col)` |
+| AUTO_INCREMENT | AUTO_INCREMENT | 移除（依赖序列） |
+| DROP TABLE | DROP TABLE | DROP TABLE IF EXISTS |
+| CREATE INDEX | CREATE INDEX | CREATE INDEX IF NOT EXISTS |
+| 布尔值 | `'true'` / `'false'` | TRUE / FALSE |
+| 字符串内转义引号 | `\"` | `"` |
 
 ## 项目结构
 
 ```
 AIXDR_data_exporter_pgsql/
-├── cli.py                          # 命令行入口
+├── cli.py                          # CLI 入口
 ├── run.py                          # 快捷运行脚本
-├── setup.py                        # 打包配置
-├── pyproject.toml                  # 现代构建配置
-├── MANIFEST.in                     # 源码包清单
+├── setup.py / pyproject.toml       # 打包配置
 ├── requirements.txt                # 依赖清单
-├── README.md                       # 项目文档
-├── QUICK_COMMAND_REFERENCE.md      # 命令速查手册
-├── dist/                           # 构建产物（可分发的安装包）
-│   ├── aixdr_data_exporter-1.2.0-py3-none-any.whl
-│   └── aixdr_data_exporter-1.2.0.tar.gz
-├── config/
-│   ├── example_postgresql_config.yaml  # PostgreSQL 配置示例
-│   └── production_config.yaml          # 生产环境配置
+├── config/                         # 配置模板
+│   ├── template_mysql_es.yaml
+│   ├── template_postgresql_es.yaml
+│   └── template_mysql_to_pg_es.yaml
 ├── exporter/
-│   ├── __init__.py                     # 包导出入口
-│   ├── postgresql_importer.py          # [新增] PostgreSQL 数据导入
-│   ├── sql_converter.py                # [新增] MySQL 到 PostgreSQL 语法转换
-│   ├── core/                           # 核心层
-│   │   ├── config_manager.py           # 配置管理器
-│   │   ├── operation.py                # 操作抽象
-│   │   └── workflow.py                 # 工作流编排
-│   ├── handlers/                       # 处理器层
-│   │   ├── base_handler.py             # 基础接口
-│   │   ├── mysql_handler.py            # MySQL 处理器
-│   │   ├── postgresql_handler.py       # [新增] PostgreSQL 处理器
-│   │   └── elasticsearch_handler.py    # ES 处理器
-│   ├── mysql_exporter.py               # MySQL 数据导出
-│   ├── mysql_importer.py               # MySQL 数据导入
-│   ├── related_tables_exporter.py      # 关联表导出
-│   ├── data_validator.py               # 数据验证
-│   └── elasticsearch_exporter.py       # ES 数据导出导入
-└── exports/                           # 导出数据目录（gitignored）
-    ├── es_latest/
-    │   ├── es_alarms.ndjson
-    │   ├── es_asset.ndjson
-    │   ├── es_asset_his.ndjson
-    │   ├── es_events.ndjson
-    │   └── es_fingerprint.ndjson
-    └── assets_export.sql
+│   ├── core/                       # 核心层
+│   │   ├── config_manager.py       # 配置管理
+│   │   ├── operation.py            # 操作抽象
+│   │   └── workflow.py             # 工作流编排
+│   ├── handlers/                   # 处理器层
+│   │   ├── mysql_handler.py
+│   │   ├── postgresql_handler.py
+│   │   └── elasticsearch_handler.py
+│   ├── mysql_exporter.py           # MySQL 导出
+│   ├── mysql_importer.py           # MySQL 导入
+│   ├── postgresql_exporter.py      # PostgreSQL 导出
+│   ├── postgresql_importer.py      # PostgreSQL 导入
+│   ├── sql_converter.py            # MySQL→PG 语法转换
+│   ├── related_tables_exporter.py  # 关联表级联导出
+│   ├── elasticsearch_exporter.py   # ES 导出导入
+│   └── data_validator.py           # 数据验证
+└── exports/                        # 导出数据目录（gitignored）
 ```
 
-## 导出内容
-
-### MySQL 数据库
-
-| 表名 | 过滤条件 | 说明 |
-|-----|---------|-----|
-| `XDR_ASSET` | `asset_id IN (...)` | 资产主表 |
-| `XDR_ASSET_IP` | `asset_id IN (...)` | 资产 IP |
-| `XDR_ASSET_VULN` | `asset_id IN (...)` | 资产漏洞 |
-| `XDR_RISK_PORT` | `asset_id IN (...)` | 风险端口 |
-| `XDR_WEAK_PASSWORD` | `device_id IN (...)` | 弱密码（通过 device_id 关联） |
-
-### Elasticsearch 索引
-
-| 索引 | 查询方式 | 说明 |
-|-----|---------|-----|
-| `xdr_asset` | `term: ASSET_ID` | 资产主数据 |
-| `xdr_asset_fingerprint` | `term: ASSET_ID` | 资产指纹 |
-| `xdr_asset_his` | `term: ASSET_ID` | 资产历史数据 |
-| `maxs_alarm_{yyyymm}` | `nested: AFFECTED_ASSET_INFO.ASSET_ID` | 告警（按月分片） |
-| `maxs_event_{yyyymm}` | `nested: AFFECTED_ASSET_INFO.ASSET_ID` | 事件（按月分片） |
-
-## 开发和打包
-
-### 本地开发运行
+## 开发与打包
 
 ```bash
-# 1. 安装依赖
+# 本地开发运行
 pip install -r requirements.txt
+python cli.py --help
 
-# 2. 直接运行（源码目录内）
-python3 cli.py --help
-```
-
-### 重新打包
-
-如果你需要修改代码并重新打包：
-
-```bash
-# 1. 清理旧构建
+# 重新打包
 rm -rf build/ dist/ *.egg-info/
-
-# 2. 构建新包
-python3 setup.py sdist bdist_wheel
-
-# 3. 新包位于 dist/ 目录
-ls -lh dist/
+python setup.py sdist bdist_wheel
+# 产物位于 dist/
 ```
-
-## 更多命令参考
-
-详见 [QUICK_COMMAND_REFERENCE.md](QUICK_COMMAND_REFERENCE.md)，包含完整的命令速查表、配置示例和常见问题解答。

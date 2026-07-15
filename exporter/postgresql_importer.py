@@ -588,7 +588,7 @@ class PostgreSQLImporter:
             self._connect()
             cursor = self.connection.cursor()
 
-            cursor.execute(f'SELECT COUNT(*) FROM "{table}"')
+            cursor.execute(f'SELECT COUNT(*) FROM {table.lower()}')
             result = cursor.fetchone()
 
             self._disconnect()

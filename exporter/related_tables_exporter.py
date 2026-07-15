@@ -113,9 +113,9 @@ class RelatedTablesExporter:
 
                         for row in rows:
                             values = self._row_to_sql_values(row, columns)
-                            col_names = ", ".join([f'"{c.lower()}"' for c in columns])
+                            col_names = ", ".join([f'`{c}`' for c in columns])
                             values_str = ", ".join(values)
-                            f.write(f'INSERT INTO "{table_name.lower()}" ({col_names}) VALUES ({values_str});\n')
+                            f.write(f'INSERT INTO `{table_name}` ({col_names}) VALUES ({values_str});\n')
 
                 # Second pass: export XDR_WEAK_PASSWORD with collected device_ids
                 if device_ids:
@@ -137,9 +137,9 @@ class RelatedTablesExporter:
 
                             for row in rows:
                                 values = self._row_to_sql_values(row, columns)
-                                col_names = ", ".join([f'"{c.lower()}"' for c in columns])
+                                col_names = ", ".join([f'`{c}`' for c in columns])
                                 values_str = ", ".join(values)
-                                f.write(f'INSERT INTO "xdr_weak_password" ({col_names}) VALUES ({values_str});\n')
+                                f.write(f'INSERT INTO `XDR_WEAK_PASSWORD` ({col_names}) VALUES ({values_str});\n')
                     except Exception as e:
                         print(f"Warning: Could not export XDR_WEAK_PASSWORD: {e}")
 
@@ -183,15 +183,19 @@ class RelatedTablesExporter:
                 # PostgreSQL uses space instead of 'T' between date and time
                 values.append(f"'{val.isoformat().replace('T', ' ')}'")
             else:
-                # Properly escape string values
-                # Escape backslashes first, then single quotes and other special chars
+                # Properly escape string values for SQL single-quoted literals
+                # Rules:
+                #   1. Escape backslashes first (\ → \\)
+                #   2. Escape single quotes (' → '')
+                #   3. Do NOT escape double quotes — inside a single-quoted SQL string
+                #      double quotes are literal characters and need no escaping.
+                #      Escaping them as \" causes PostgreSQL (standard_conforming_strings=on)
+                #      to store the literal backslash+doublequote rather than just doublequote.
                 str_val = str(val)
                 # Escape backslashes
                 str_val = str_val.replace('\\', '\\\\')
                 # Escape single quotes
                 str_val = str_val.replace("'", "''")
-                # Escape double quotes (for safety)
-                str_val = str_val.replace('"', '\\"')
                 # Escape null bytes
                 str_val = str_val.replace('\x00', '\\0')
                 values.append(f"'{str_val}'")

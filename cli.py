@@ -385,8 +385,11 @@ def export_import(config, source, target):
             print_error(f"Unsupported target type: {target_type}")
             return
 
-        # Get temporary file path
-        temp_file = ConfigManager.extract_export_output(cfg)
+        # Get temporary file path (ES uses a directory, MySQL/PostgreSQL use a file)
+        if source_type == 'es':
+            temp_file = ConfigManager.extract_es_export_output(cfg)
+        else:
+            temp_file = ConfigManager.extract_export_output(cfg)
         temp_file = ConfigManager.resolve_output_path(temp_file)
 
         # Check if verify is enabled

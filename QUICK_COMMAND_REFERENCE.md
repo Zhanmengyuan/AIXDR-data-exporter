@@ -518,12 +518,6 @@ python3 cli.py export --config config.yaml
 python3 cli.py import --config config.yaml --target postgresql
 ```
 
-### 场景 5：从 MySQL 导出到 Elasticsearch
-
-```bash
-python3 cli.py export-import --config config.yaml --source mysql --target es
-```
-
 ### 场景 6：ES 数据导出和导入
 
 ```bash

@@ -97,9 +97,9 @@ class MySQLExporter:
                                     str_val = str_val.replace('\x00', '\\0')
                                     values.append(f"'{str_val}'")
 
-                            col_names = ", ".join([f'"{c.lower()}"' for c in columns])
+                            col_names = ", ".join([f'`{c}`' for c in columns])
                             values_str = ", ".join(values)
-                            f.write(f'INSERT INTO "{table.lower()}" ({col_names}) VALUES ({values_str});\n')
+                            f.write(f'INSERT INTO `{table}` ({col_names}) VALUES ({values_str});\n')
 
             self._disconnect()
             return True

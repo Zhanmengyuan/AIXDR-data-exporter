@@ -64,30 +64,45 @@ class MySQLImporter:
             # Split SQL statements more intelligently
             statements = self._split_sql_statements(sql_content)
 
+            # Cache for target table columns (for INSERT column filtering)
+            target_columns_cache = {}
+            rebuild_count = 0
+            skip_count = 0
+
             insert_count = 0
             for stmt in statements:
                 if not stmt:
                     continue
 
+                stmt_upper = stmt.upper().strip()
+
                 # When using smart deletion (asset_ids), skip DROP and CREATE table statements
                 # as tables already exist and we only want to insert data
                 if asset_ids and not drop_tables:
                     # Skip DROP TABLE statements
-                    if stmt.upper().strip().startswith('DROP TABLE'):
+                    if stmt_upper.startswith('DROP TABLE'):
                         continue
                     # Convert CREATE TABLE to CREATE TABLE IF NOT EXISTS to avoid errors
-                    if stmt.upper().strip().startswith('CREATE TABLE'):
+                    if stmt_upper.startswith('CREATE TABLE'):
                         stmt = stmt.replace('CREATE TABLE', 'CREATE TABLE IF NOT EXISTS', 1)
+                        stmt_upper = stmt.upper().strip()
+
+                # Filter INSERT columns to match target table schema
+                if stmt_upper.startswith('INSERT INTO'):
+                    original_stmt = stmt
+                    stmt = self._rebuild_insert_for_target(stmt, cursor, target_columns_cache)
+                    if stmt is None:
+                        skip_count += 1
+                        continue
+                    if stmt != original_stmt:
+                        rebuild_count += 1
 
                 try:
-                    # For INSERT statements with smart deletion, use special handling
-                    if stmt.upper().strip().startswith('INSERT INTO') and asset_ids and not drop_tables:
-                        cursor.execute(stmt)
+                    cursor.execute(stmt)
+                    if stmt_upper.startswith('INSERT INTO'):
                         insert_count += 1
                         if insert_count % 100 == 0:
                             print(f"  Inserted {insert_count} records...")
-                    else:
-                        cursor.execute(stmt)
                 except Exception as e:
                     error_str = str(e).lower()
                     # Skip errors for CREATE TABLE IF NOT EXISTS
@@ -107,6 +122,10 @@ class MySQLImporter:
                         return False
 
             self.connection.commit()
+            if rebuild_count > 0:
+                print(f"ℹ Rebuilt {rebuild_count} INSERT statements to match target schema")
+            if skip_count > 0:
+                print(f"ℹ Skipped {skip_count} INSERT statements (no matching columns)")
             if insert_count > 0:
                 print(f"✓ Successfully inserted {insert_count} records")
             self._disconnect()
@@ -159,6 +178,145 @@ class MySQLImporter:
             statements.append(stmt)
 
         return statements
+
+    def _get_target_columns(self, cursor, table_name: str, cache: dict) -> set:
+        """Get column names for a table in the target database (cached)"""
+        clean_name = table_name.strip('`"')
+        if clean_name in cache:
+            return cache[clean_name]
+
+        try:
+            cursor.execute(f"DESCRIBE `{clean_name}`")
+            cols = {row['Field'].lower() for row in cursor.fetchall()}
+            cache[clean_name] = cols
+            return cols
+        except Exception:
+            cache[clean_name] = None
+            return None
+
+    def _rebuild_insert_for_target(self, stmt: str, cursor, cache: dict) -> str:
+        """Filter INSERT to only include columns that exist in the target table.
+
+        Returns:
+            str: Rebuilt INSERT statement, or original if no mismatch.
+            None: If no columns match the target (skip this INSERT).
+        """
+        import re
+
+        match = re.match(
+            r'INSERT\s+INTO\s+(?:`([^`]+)`|"([^"]+)"|(\w+))\s*\(\s*(.*?)\s*\)\s*VALUES\s*\(',
+            stmt, re.IGNORECASE | re.DOTALL
+        )
+        if not match:
+            return stmt
+
+        table_name = match.group(1) or match.group(2) or match.group(3)
+        columns_str = match.group(4)
+        raw_columns = [c.strip().strip('`"') for c in columns_str.split(',')]
+        columns_lower = [c.lower() for c in raw_columns]
+
+        target_cols = self._get_target_columns(cursor, table_name, cache)
+        if target_cols is None:
+            return stmt
+
+        missing = {c for c in columns_lower if c not in target_cols}
+        if not missing:
+            return stmt
+
+        values_start = match.end()
+        values_str = self._extract_parenthesized_content(stmt, values_start)
+        if values_str is None:
+            return stmt
+
+        values = self._parse_sql_row_values(values_str)
+
+        keep_indices = [i for i, c in enumerate(columns_lower) if c not in missing]
+        if not keep_indices:
+            return None
+
+        if match.group(1):
+            table_ref = f'`{table_name}`'
+            quote = '`'
+        elif match.group(2):
+            table_ref = f'"{table_name}"'
+            quote = '"'
+        else:
+            table_ref = table_name
+            quote = ''
+
+        new_columns = [f'{quote}{raw_columns[i]}{quote}' for i in keep_indices]
+        new_values = [values[i] if i < len(values) else 'NULL' for i in keep_indices]
+
+        return f'INSERT INTO {table_ref} ({", ".join(new_columns)}) VALUES ({", ".join(new_values)});'
+
+    def _extract_parenthesized_content(self, s: str, start: int) -> str:
+        """Extract content between matching parentheses, starting right after the opening paren"""
+        depth = 1
+        result = []
+        in_single_quote = False
+        in_double_quote = False
+        in_backtick = False
+        i = start
+
+        while i < len(s):
+            char = s[i]
+
+            if char == '\\' and i + 1 < len(s):
+                result.append(char)
+                result.append(s[i + 1])
+                i += 2
+                continue
+
+            if char == "'" and not in_double_quote and not in_backtick:
+                in_single_quote = not in_single_quote
+            elif char == '"' and not in_single_quote and not in_backtick:
+                in_double_quote = not in_double_quote
+            elif char == '`' and not in_single_quote and not in_double_quote:
+                in_backtick = not in_backtick
+            elif not in_single_quote and not in_double_quote and not in_backtick:
+                if char == '(':
+                    depth += 1
+                elif char == ')':
+                    depth -= 1
+                    if depth == 0:
+                        return ''.join(result)
+
+            result.append(char)
+            i += 1
+
+        return None
+
+    def _parse_sql_row_values(self, values_str: str) -> list:
+        """Parse SQL VALUES clause content into individual value strings"""
+        values = []
+        current = []
+        in_single_quote = False
+        paren_depth = 0
+
+        for char in values_str:
+            if char == "'" and not in_single_quote:
+                in_single_quote = True
+                current.append(char)
+            elif char == "'" and in_single_quote:
+                in_single_quote = False
+                current.append(char)
+            elif char == '(' and not in_single_quote:
+                paren_depth += 1
+                current.append(char)
+            elif char == ')' and not in_single_quote:
+                paren_depth -= 1
+                if paren_depth >= 0:
+                    current.append(char)
+            elif char == ',' and not in_single_quote and paren_depth == 0:
+                values.append(''.join(current).strip())
+                current = []
+            else:
+                current.append(char)
+
+        if current:
+            values.append(''.join(current).strip())
+
+        return values
 
     def _delete_by_asset_ids(self, cursor, asset_ids: list) -> bool:
         """Delete data related to specific asset_ids"""

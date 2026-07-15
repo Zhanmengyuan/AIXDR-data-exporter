@@ -208,8 +208,20 @@ class ConfigManager:
 
     @staticmethod
     def extract_asset_ids(cfg: Dict[str, Any]) -> Optional[list]:
-        """Extract asset IDs from config"""
-        return cfg.get('assets', None)
+        """Extract asset IDs from config
+        Supports multiple formats:
+        - YAML list:  assets:\n  - 201737...
+        - YAML inline: assets: [201737..., 201915...]
+        - Comma-separated string: assets: \"201737..., 201915...\"
+        """
+        assets = cfg.get('assets', None)
+        if assets is None:
+            return None
+        if isinstance(assets, str):
+            return [a.strip() for a in assets.split(',') if a.strip()]
+        if isinstance(assets, list):
+            return assets
+        return None
 
     @staticmethod
     def extract_table_list(cfg: Dict[str, Any]) -> Optional[list]:
